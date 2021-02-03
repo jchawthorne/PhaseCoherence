@@ -1132,7 +1132,7 @@ class PhaseCoherence(object):
                     # we'll just assume the same station distribution for all times
                     Nboot=15
                     if Nsboot>=3 and nsta>1:
-                        Cpcomp_std=np.mean(Cpcomp,axis=1)
+                        Cpcomp_std=np.mean(Cpcomp,axis=2)
                         mtx=np.array([np.bincount(np.random.choice(nsta,nsta,replace=True),
                                                   minlength=nsta)
                                       for kb in range(0,Nboot)]).T

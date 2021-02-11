@@ -100,9 +100,11 @@ class PhaseCoherence(object):
 
     # -------------------------------------------------------------------------------        
     def ComputePhaseCoherence(self,reftemp=None, shtemp=None, wintemp=None,\
-                 buftemp=None, reflook=None, shlook=None, wlenlook=None, tlook=None,\
-                 blim=None, shtry=None, shgrid=None, taper=True, cptype='both',\
-                              normtype=None,abound=None,verbose=True):
+                              buftemp=None, reflook=None, shlook=None, wlenlook=None,\
+                              tlook=None,blim=None, shtry=None, shgrid=None,\
+                              taper=True, cptype='both',\
+                              normtype=None,abound=None,verbose=True,
+                              returnjack=None):
         '''
         This function assumes you already prepare the data, makes te rest
          * reftemp   : reference time for templates (default: often ignored, 
@@ -128,6 +130,7 @@ class PhaseCoherence(object):
                             - 'both' (default) for both
         * normtype  : Which normalization to use
         * abound    : a bound on the amplitude to use with normalization
+        * returnjack: return the jackknifing results?
 
         * verbose   : Let the code whisper sweet words into your ears...                   
         '''
@@ -136,7 +139,7 @@ class PhaseCoherence(object):
         print('1: Set parameters')
         self.setParams(reftemp, shtemp, wintemp,buftemp, reflook,\
                        shlook, wlenlook, tlook, blim, shtry, shgrid,
-                       normtype=normtype)
+                       normtype=normtype,returnjack=returnjack)
         import timeit
         t1=timeit.time.time()
         
@@ -168,7 +171,8 @@ class PhaseCoherence(object):
     def ComputeAll(self,reftemp=None, shtemp='t0', wintemp=None,\
                    buftemp=None, reflook=None, shlook='t0', wlenlook=5., tlook=None,\
                    blim=None, shtry=None, shgrid=None, taper=True, cptype='both',\
-                   normtype=None,abound=None,verbose=True):
+                   normtype=None,abound=None,verbose=True,
+                   returnjack=None):
 
         '''
         Main function of this class. It will call a bunch of others to compute the
@@ -197,6 +201,7 @@ class PhaseCoherence(object):
                             - 'both' (default) for both
         * normtype  : Which normalization to use
         * abound    : A bound on the amplitude after normalization
+        * returnjack: return the jackknifing results?
 
         * verbose   : Let the code whisper sweet words into your ears...                   
         '''
@@ -222,7 +227,8 @@ class PhaseCoherence(object):
         # 5/ Set parameters
         self.setParams(reftemp, shtemp, wintemp,buftemp, reflook,\
                        shlook, wlenlook, tlook, blim, shtry, shgrid,
-                       normtype=normtype,abound=abound)
+                       normtype=normtype,abound=abound,
+                       returnjack=returnjack)
 
         print('6: x-c')
         # 6/ Make template-data cross-correlation
@@ -250,6 +256,7 @@ class PhaseCoherence(object):
 
         # reset the data to the template
         st=self.template.copy()
+        data=self.data
         self.data=st
 
         for tr in st:
@@ -275,10 +282,12 @@ class PhaseCoherence(object):
 
         # and reset the reference times
         params=self.params
+        reflook,shlook=params['reflook'],params['shlook']
         params['reflook']=params['reftemp']
         params['shlook']=params['shtemp']
 
         # consider time with no shift
+        tlook=params['tlook']
         params['tlook']=np.array([0.])
 
         # 6/ Make template-data cross-correlation
@@ -288,7 +297,6 @@ class PhaseCoherence(object):
         # 7/ Taper crosscor if wanted
         self.taperCrosscorr()
 
-
         # 8/ Compute Cp
         self.computeCp()
 
@@ -296,6 +304,12 @@ class PhaseCoherence(object):
         self.temppow={'Cpstat':self.Cp['Cpstat'][0],
                       'Cpcomp':self.Cp['Cpcomp'][0]}
 
+
+        # reset the data to the original
+        self.data=data
+        params['reflook']=reflook
+        params['shlook']=shlook
+        params['tlook']=tlook
 
     def errorDist(self,typ='chi2',bns=None):
         """
@@ -331,9 +345,10 @@ class PhaseCoherence(object):
             
     
     # -------------------------------------------------------------------------------        
-    def setParams(self,reftemp=None, shtemp='t0', wintemp=None,buftemp=None,\
-                  reflook=None, shlook='t0', wlenlook=None, tlook=None,\
-                  blim=None, shtry=None, shgrid=None,normtype=None,abound=None):
+    def setParams(self,reftemp=None, shtemp=None, wintemp=None,buftemp=None,\
+                  reflook=None, shlook=None, wlenlook=None, tlook=None,\
+                  blim=None, shtry=None, shgrid=None,normtype=None,abound=None,
+                  returnjack=None):
 
         ''' 
         Set the different parameters used for the phase coherence analysis in a dictionnary
@@ -357,6 +372,7 @@ class PhaseCoherence(object):
         * shgrid    : Time spacing to use for gridding (default: wlen/4)
         * normtype  : which type of normalization to use (default: 'full')
         * abound    : a bounding on the amplitude after normalization (default: 3)
+        * returnjack: Return the jackknifing results
         '''
 
         # Make empty dictionnary if needed
@@ -370,12 +386,12 @@ class PhaseCoherence(object):
         # default reference times
         if reftemp is None:
             param['reftemp'] = self.template[0].stats.starttime
-        else:
+        elif not 'reftemp' in param.keys():
             param['reftemp'] = reftemp
 
         if reflook is None:
             param['reflook'] = self.data[0].stats.starttime
-        else:
+        elif not 'reflook' in param.keys():
             param['reflook'] = reflook
 
         # template info
@@ -384,18 +400,30 @@ class PhaseCoherence(object):
             param['wintemp'] = np.array(wintemp)
 
         if buftemp is None:
-            # CHANGED on 24-Sep-2 by JCH
             if not 'buftemp' in param.keys():
                 param['buftemp'] = np.diff(self.params['wintemp'])[0]/6.
         else:
             param['buftemp'] = buftemp
 
+        # return the jackknifing results?
+        if returnjack is None:
+            if not 'returnjack' in param.keys():
+                param['returnjack'] = False
+        else:
+            param['returnjack'] = returnjack
+
+            
         # Time shift for template and data
         if shlook is not None:
             param['shlook'] = shlook
+        elif not 'shlook' in param.keys():
+            param['shlook']='t0'
+
         if shtemp is not None:
             param['shtemp'] = shtemp
-        
+        elif not 'shtemp' in param.keys():
+            param['shtemp']='t0'
+            
         # Length of looking window
         if wlenlook is not None:
             param['wlenlook'] = wlenlook            
@@ -556,7 +584,7 @@ class PhaseCoherence(object):
         Nst      = self.Nst
 
         # a time to allow buffering of the data
-        buftime = (wlenlook+buftemp*2+np.diff(wintemp)[0])*0.05
+        buftime = wlenlook+buftemp*2+np.diff(wintemp)[0]
         buftime = buftime + 3*dtim
 
         # length of template
@@ -935,16 +963,24 @@ class PhaseCoherence(object):
             # relative to median at each station
             # average over frequencies at each station
             wgts = np.nanmean(np.abs(xc),axis=0,keepdims=True)
+            wgtsi=np.median(wgts[0,:,:],axis=0)
             wgts = np.divide(np.ma.median(wgts,axis=2,keepdims=True),wgts)
 
             # note the outliers
             abound=self.params['abound']
-            ioutlier=np.logical_or(wgts<1/abound,wgts>abound)
-            wgts[ioutlier]=np.minimum(wgts[ioutlier],1/abound)
+
+            # outliers where signal is too big
+            ibig=wgts<1/abound
+            wgts[ibig]=np.power(wgts[ibig]*abound,2)
+            
+            # and where the signal is too small
+            ismall=wgts>abound
+            wgts[ismall]=np.minimum(wgts[ismall],abound)
 
             # set all the other weights to 1.
+            ioutlier=np.logical_or(ibig,ismall)
             wgts[~ioutlier]=1.
-
+            
             # and go ahead and multiply the normalized x-c by the weights
             xc=np.multiply(xc,wgts)
 
@@ -1008,16 +1044,18 @@ class PhaseCoherence(object):
         # initialize output
         if cptype in ['stat','both']:
             # to save inter-station coherence
-            Nsboot=15
+            Nsboot=50
             Cpstat=np.zeros([Nt,Nsboot+1,self.Ntap],dtype=float)
-            Cpsnorm=np.zeros(Nt,dtype=float)
             
         if cptype in ['comp','both']:
             # and inter-station coherence
             Cpcomp=np.zeros([Nt,len(nper),self.Ntap],dtype=float)
-            Cpcnorm=np.zeros(Nt,dtype=float)
+            Cpcompn=np.zeros([Nt,len(nper),self.Ntap],dtype=float)
 
         print('starting cp computation')
+
+        # use uncertainty from tapering?
+        tapunc=False
 
         # iterate per taper
         for ktap in range(0,self.Ntap):
@@ -1035,16 +1073,19 @@ class PhaseCoherence(object):
             # time intervals
 
             statok=np.where(nper>=1)[0]
-            npick=int(np.ceil(statok.size*0.75))
+            npick=int(np.ceil(statok.size*0.8))
             # these are the weights for each station for the bootstrap selections
             mtx=np.array([np.bincount(np.random.choice(statok,npick,replace=False),
                                       minlength=len(nper))
                           for kb in range(0,Nsboot)]).T.astype(bool)
+            if self.params['returnjack']:
+                Cp['ijack_stat']=mtx
             mtx=np.append(np.ones([nper.size,1],dtype=bool),mtx,axis=1)
+
             
             if cptype in ['stat','both']:
                 # sum, separated by station
-                Nstat=np.zeros([Nt,Nc])
+                Nstat=np.zeros([Nt,1+Nsboot,Nc])
 
                 # compute inter-station coherence for each component
                 for ks in range(0,Nc):
@@ -1053,47 +1094,62 @@ class PhaseCoherence(object):
                     # at each component
                     ii=icmp==ks
                     mmult=mtx[ins[ii],:]
-                    
+
                     if sum(ii)>1:
                         if isinstance(wgts,np.ndarray):
                             wgtsi=wgts[:,:,ii]
                         else:
                             wgtsi=wgts
                         # coherence for this component
-                        Rstati,nn=self._calcCp(xc=xc[:,:,ii],ii=None,dok=dok[:,ii],
+                        Rstati,Rstatn,nn=self._calcCp(xc=xc[:,:,ii],ii=None,dok=dok[:,ii],
                                                wgts=wgtsi,mmult=mmult)
+
+                        # normalise
+                        Rstati=np.divide(Rstati,Rstatn)
                         
                         # add to set
                         Cpstat[:,:,ktap]=Cpstat[:,:,ktap]+Rstati
-                        Nstat[:,ks]=Nstat[:,ks]+nn[:,0]
+                        Nstat[:,:,ks]=Nstat[:,:,ks]+nn
 
                 if ktap==self.Ntap-1:
                     # normalize inter-station coherence
-                    Nci = np.sum(Nstat>=2,axis=1).astype(float)
+                    Nci = np.sum(Nstat>=2,axis=2).astype(float)
                     Nci = np.ma.masked_array(Nci,mask=Nci==0)
+                    Nci = Nci.reshape(list(Nci.shape)+[1])
 
+                    # go ahead and normalize everything
+                    Cpstat = np.divide(Cpstat,Nci)
+                    
                     # get uncertainty
-                    if Nsboot>=3 and self.Ntap>1:
+                    if Nsboot>=3 and self.Ntap>1 and tapunc:
                         # sum bootstrap and taper uncertainties
                         Cpstat_std_tap=np.ma.var(Cpstat[:,0,:],axis=1)/self.Ntap
-                        Cpstat_std_boot=np.ma.var(np.ma.mean(Cpstat[:,1:,:],axis=2),axis=1)
+                        Cpstat_std_boot=np.ma.mean(Cpstat[:,1:,:],axis=2)
+                        if self.params['returnjack']:
+                            Cp['Cpstat_jack']=Cpstat_std_boot
+                        Cpstat_std_boot=np.ma.var(Cpstat_std_boot,axis=1)
                         Cpstat_std=np.power(Cpstat_std_boot+Cpstat_std_tap,0.5)
+                    elif Nsboot>=3:
+                        # just bootstrap uncertainty
+
+                        # taper-averaged bootstrap values
+                        Cpstat_std=np.ma.mean(Cpstat[:,1:,:],axis=2)
+                        # save output
+                        if self.params['returnjack']:
+                            Cp['Cpstat_jack']=Cpstat_std
+                        # get std
+                        Cpstat_std=np.ma.std(Cpstat_std,axis=1)
                     elif self.Ntap>1:
                         # just taper uncertainty
                         Cpstat_std=np.ma.std(Cpstat[:,0,:],axis=1)/self.Ntap**0.5
-                    elif Nsboot>=3:
-                        # just bootstrap uncertainty
-                        Cpstat_std_boot=np.ma.std(np.ma.mean(Cpstat[:,1:,:],axis=2),axis=1)
                     else:
                         # no uncertainty estimate
                         Cpstat_std=np.ma.masked_array(np.zeros(Nt,dtype=float),
                                                       mask=np.ones(Nt,dtype=bool))
 
-                    # normalize
-                    Cpstat_std = np.ma.divide(Cpstat_std,Nci)
                         
                     # and the best estimate, with all stations
-                    Cpstat = np.ma.divide(np.ma.mean(Cpstat[:,0,:],axis=1),Nci)
+                    Cpstat = np.ma.mean(Cpstat[:,0,:],axis=1)
 
                     Cp['Cpstat'] = Cpstat
                     Cp['Nstat']  = Nstat
@@ -1112,10 +1168,11 @@ class PhaseCoherence(object):
                 
                     if sum(ii)>1:
                         # coherence for this component
-                        Rcompi,nn=self._calcCp(xc,ii,dok,wgts)
+                        Rcompi,Rcompn,nn=self._calcCp(xc,ii,dok,wgts)
                         
                         # add to set
                         Cpcomp[:,ks,ktap]=Cpcomp[:,ks,ktap]+Rcompi
+                        Cpcompn[:,ks,ktap]=Cpcompn[:,ks,ktap]+Rcompn
                         Ncomp[:,ks]=Ncomp[:,ks]+nn
 
                 if ktap==self.Ntap-1:
@@ -1123,6 +1180,7 @@ class PhaseCoherence(object):
                     Ncompi=Ncomp>=2
                     statok=np.sum(Ncompi,axis=0)>0
                     Ncompi,Cpcomp=Ncompi[:,statok],Cpcomp[:,statok,:]
+                    Cpcompn=Cpcompn[:,statok,:]
                     nsta=Cpcomp.shape[1]
 
                     # for normalization
@@ -1130,28 +1188,60 @@ class PhaseCoherence(object):
                     
                     # choose various subsets of the stations to bootstrap
                     # we'll just assume the same station distribution for all times
-                    Nboot=15
+                    Nsboot=50
                     if Nsboot>=3 and nsta>1:
-                        Cpcomp_std=np.mean(Cpcomp,axis=2)
-                        mtx=np.array([np.bincount(np.random.choice(nsta,nsta,replace=True),
+                        # which bootstrap stations
+                        npick=int(nsta*.8)
+                        mtx=np.array([np.bincount(np.random.choice(nsta,npick,replace=False),
                                                   minlength=nsta)
-                                      for kb in range(0,Nboot)]).T
-                        Cpcomp_std=np.divide(np.dot(Cpcomp_std,mtx),np.dot(Ncompi,mtx))
+                                      for kb in range(0,Nsboot)]).T
+
+                        # correct normalization
+                        Cpcomp_std=np.ma.mean(Cpcomp,axis=2)
+                        Cpcomp_std=np.ma.dot(Cpcomp_std,mtx)
+
+
+                        if not np.isscalar(Cpcompn):
+                            Cpcomp_stdn=np.ma.dot(np.mean(Cpcompn,axis=2),mtx)
+                        else:
+                            Cpcomp_stdn=Cpcompn
+
+                        # normalize and average over stations
+                        Cpcomp_std=np.ma.divide(np.ma.divide(Cpcomp_std,Cpcomp_stdn),
+                                             np.dot(Ncompi,mtx))
+
+
+                        # save the jackknife results if desired
+                        if self.params['returnjack']:
+                            Cp['Cpcomp_jack']=Cpcomp_std
+                            Cp['ijack_comp']=mtx
+
+                        # and to variance
                         Cpcomp_std=np.ma.var(Cpcomp_std,axis=1)
-                        if self.Ntap>1:
-                            Cpcomp_std_tap=np.ma.var(np.ma.mean(Cpcomp,axis=1),axis=1)
+
+                        # add tapering?
+                        if self.Ntap>1 and tapunc:
+                            Cpcomp_std_tap=np.divide(np.ma.mean(Cpcomp,axis=1),
+                                                     np.ma.mean(Cpcompn,axis=1))
+                            Cpcomp_std_tap=np.ma.var(Cpcomp_std_tap,axis=1)/self.Ntap
                             Cpcomp_std_tap = np.ma.divide(Cpcomp_std_tap,Nci)
                             Cpcomp_std=np.power(Cpcomp_std+Cpcomp_std_tap,0.5)
                         else:
                             Cpcomp_std=np.power(Cpcomp_std,0.5)
                     elif self.Ntap>1:
-                        Cpcomp_std=np.ma.std(np.ma.mean(Cpcomp,axis=1),axis=1)
-                        Cpcomp_std = np.ma.divide(Cpcomp_std,Nci)
+                        Cpcomp_std = np.divide(np.ma.mean(Cpcomp,axis=1),
+                                             np.ma.mean(Cpcompn,axis=1))
+                        Cpcomp_std = np.ma.std(np.ma.mean(Cpcomp_std,axis=1),axis=1)
+                        Cpcomp_std = np.ma.divide(Cpcomp_std,Nci*Ntap**0.5)
                     else:
                         Cpcomp_std=np.ma.masked_array(np.zeros(Nt,dtype=float),mask=True)
 
                     # normalize the average inter-component coherence
-                    Cpcomp = np.divide(np.ma.mean(np.ma.sum(Cpcomp,axis=1),axis=1),Nci)
+                    Cpcomp=np.ma.mean(Cpcomp,axis=2)
+                    Cpcompn=np.ma.mean(Cpcompn,axis=2)
+                    Cpcomp=np.divide(np.ma.sum(Cpcomp,axis=1),
+                                     np.ma.sum(Cpcompn,axis=1))
+                    Cpcomp = np.ma.divide(Cpcomp,Nci)
 
                     Cp['Cpcomp'] = Cpcomp
                     Cp['Ncomp']  = Ncomp
@@ -1238,9 +1328,6 @@ class PhaseCoherence(object):
             # average over frequencies
             Rstatn=np.ma.mean(Rstatn,axis=0).reshape([Nt,mmult.shape[1]])
             
-            # and divide the data-derived values by the template
-            Rstati=np.ma.divide(Rstati,Rstatn)
-            
         elif self.params['normtype'] in ['template_bounded_bystation']:
             # average without taking absolute value (Phase walkout)
             Rstatn=np.abs(np.dot(wgts,mmult))
@@ -1252,9 +1339,10 @@ class PhaseCoherence(object):
             
             # to phase coherence
             Rstatn=np.ma.divide(np.ma.divide(np.power(Rstatn,2),nni)-Rsub,nni-1.)
-
-            # and divide the data-derived values by the template
-            Rstati=np.ma.divide(Rstati,Rstatn.reshape(Rstati.shape))
+            Rstatn=Rstatn.reshape(Rstati.shape)
+        else:
+            # note a single normalization
+            Rstatn=1.
             
         # check if there are enough stations 
         # and set masked values to zero
@@ -1266,8 +1354,10 @@ class PhaseCoherence(object):
         # back to single dimension if desired
         if ndim==1:
             Rstati,nn=Rstati.flatten(),nn.flatten()
+            if not np.isscalar(Rstatn):
+                Rstatn=Rstatn.flatten()
             
-        return Rstati,nn
+        return Rstati,Rstatn,nn
     
 
     # -------------------------------------------------------------------------------        

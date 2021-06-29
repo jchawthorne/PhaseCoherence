@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from matplotlib import gridspec
 
+
 class PhaseCoherence(object):
 
     '''

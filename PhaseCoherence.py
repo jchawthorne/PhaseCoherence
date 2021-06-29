@@ -328,6 +328,9 @@ class PhaseCoherence(object):
         if typ == 'chi2':
             # number of variables to average over
             Npair,Nind,Nave = self.naveraged()
+            Nave=int(np.round(np.mean(Nave)))
+            Nind=np.median(Nind[Nind>0])
+
 
             # make random distributions
             vl=[np.mean(np.random.chisquare(1,Nave))-1.

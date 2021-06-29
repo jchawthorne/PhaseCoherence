@@ -6,6 +6,7 @@ Transformed into class by B. Gombert (May 2018)
 
 '''
 
+
 # Import classic external stuff
 import copy
 import numpy as np

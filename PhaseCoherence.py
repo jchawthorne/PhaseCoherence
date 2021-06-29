@@ -328,14 +328,15 @@ class PhaseCoherence(object):
         if typ == 'chi2':
             # number of variables to average over
             Npair,Nind,Nave = self.naveraged()
-
+            Nave=int(np.round(np.mean(Nave)))
+            Nind=np.median(Nind[Nind>0])
+            
             # make random distributions
             vl=[np.mean(np.random.chisquare(1,Nave))-1.
                 for k in range(0,20000)]
             vl=vl/Nind/(Nind-1)
 
             # note standard deviation
-            Nind=np.median(Nind[Nind>0])
             stdev=np.std(vl)
 
         # bin them
@@ -1057,6 +1058,9 @@ class PhaseCoherence(object):
         # use uncertainty from tapering?
         tapunc=False
 
+        # use a median rather than mean in the computation of Cp
+        usemedian=False
+
         # iterate per taper
         for ktap in range(0,self.Ntap):
             # normalize
@@ -1074,6 +1078,7 @@ class PhaseCoherence(object):
 
             statok=np.where(nper>=1)[0]
             npick=int(np.ceil(statok.size*0.8))
+            npick=np.minimum(npick,statok.size-1)
             # these are the weights for each station for the bootstrap selections
             mtx=np.array([np.bincount(np.random.choice(statok,npick,replace=False),
                                       minlength=len(nper))
@@ -1191,18 +1196,33 @@ class PhaseCoherence(object):
                     Nsboot=50
                     if Nsboot>=3 and nsta>1:
                         # which bootstrap stations
-                        npick=int(nsta*.8)
+                        npick=int(nsta*.7)
+                        npick=np.minimum(npick,nsta-1)
                         mtx=np.array([np.bincount(np.random.choice(nsta,npick,replace=False),
                                                   minlength=nsta)
                                       for kb in range(0,Nsboot)]).T
 
-                        # correct normalization
+                        # average over tapers
                         Cpcomp_std=np.ma.mean(Cpcomp,axis=2)
-                        Cpcomp_std=np.ma.dot(Cpcomp_std,mtx)
+
+
+                        if usemedian:
+                            mtx=mtx.astype(bool)
+                            Cpcomp_std=np.hstack([np.median(Cpcomp_std[:,mtx[:,m]],axis=1,
+                                                          keepdims=True)/np.sum(mtx[:,m])
+                                                  for m in range(0,Nsboot)])
+                        else:                        
+                            Cpcomp_std=np.ma.dot(Cpcomp_std,mtx)
 
 
                         if not np.isscalar(Cpcompn):
-                            Cpcomp_stdn=np.ma.dot(np.mean(Cpcompn,axis=2),mtx)
+                            if usemedian:
+                                Cpcomp_stdn=np.mean(Cpcompn,axis=2)
+                                Cpcomp_stdn=np.hstack([np.median(Cpcomp_stdn[:,mtx[:,m]],axis=1,
+                                                                 keepdims=True)
+                                                       for m in range(0,Nsboot)])
+                            else:
+                                Cpcomp_stdn=np.ma.dot(np.mean(Cpcompn,axis=2),mtx)
                         else:
                             Cpcomp_stdn=Cpcompn
 
@@ -1228,7 +1248,7 @@ class PhaseCoherence(object):
                             Cpcomp_std=np.power(Cpcomp_std+Cpcomp_std_tap,0.5)
                         else:
                             Cpcomp_std=np.power(Cpcomp_std,0.5)
-                    elif self.Ntap>1:
+                    elif self.Ntap>1 and np.sum(statok):
                         Cpcomp_std = np.divide(np.ma.mean(Cpcomp,axis=1),
                                              np.ma.mean(Cpcompn,axis=1))
                         Cpcomp_std = np.ma.std(np.ma.mean(Cpcomp_std,axis=1),axis=1)
@@ -1239,8 +1259,12 @@ class PhaseCoherence(object):
                     # normalize the average inter-component coherence
                     Cpcomp=np.ma.mean(Cpcomp,axis=2)
                     Cpcompn=np.ma.mean(Cpcompn,axis=2)
-                    Cpcomp=np.divide(np.ma.sum(Cpcomp,axis=1),
-                                     np.ma.sum(Cpcompn,axis=1))
+                    if usemedian:
+                        Cpcomp=np.divide(np.ma.median(Cpcomp,axis=1),
+                                         np.ma.sum(Cpcompn,axis=1))*Cpcomp.shape[1]
+                    else:
+                        Cpcomp=np.divide(np.ma.sum(Cpcomp,axis=1),
+                                         np.ma.sum(Cpcompn,axis=1))
                     Cpcomp = np.ma.divide(Cpcomp,Nci)
 
                     Cp['Cpcomp'] = Cpcomp
@@ -1290,15 +1314,84 @@ class PhaseCoherence(object):
         else:
             ndim=2
 
-        # compute phase walkout
-        Rstati=np.abs(np.dot(xc,mmult))
+            
+        phasefirst=0
+        phasefirst=phasefirst * int(np.max(np.abs(xc))>2)
+        
+        phasefirst=int(phasefirst)
+        if phasefirst==2:
+            # just use yes or no
+            mmulti=mmult!=0
+
+            # normalize so that the power summed over frequencies stays the same
+            Rphs=np.sum(np.power(np.abs(xc),2),axis=0,
+                        keepdims=True)
+            Rphs=np.divide(xc,np.power(Rphs,0.5))
+            
+
+            for kb in range(0,mmult.shape[1]):
+                # in case there are different bootstrap station selections
+                iok=mmult[:,kb]!=0
+                Rphsi=Rphs[:,:,iok]
+
+
+            
+            import code
+            code.interact(local=locals())
+            return
+
+
+        elif phasefirst:
+            # just use yes or no
+            mmulti=mmult!=0
+            
+            # compute phase walkout of normalized values
+            Rphs=np.dot(np.divide(xc,np.abs(xc)),mmulti)
+
+            # normalize this
+            #Rphs=np.divide(Rphs,np.abs(Rphs))
+
+
+            # now compute average energy in this direction
+            # convert factors to true/false so we can take the median
+
+            Rstati=np.ndarray(Rphs.shape,dtype=float)
+            Rsub=np.ndarray(Rphs.shape,dtype=float)
+            xcab=np.abs(xc)
+            
+            for kb in range(0,mmult.shape[1]):
+                # in case there are different bootstrap station selections
+                iok=mmult[:,kb]!=0
+                Rphsi=Rphs[:,:,kb:kb+1]
+                Rphsa=np.abs(Rphsi)
+
+                # the median expected by chance
+                Rsubh=np.median(xcab[:,:,iok],axis=xc.ndim-1,keepdims=True)
+                #Rsub[:,:,kb:kb+1]=np.divide(Rsubh,Rphsa)/np.sum(iok)
+                Rsub[:,:,kb:kb+1]=Rsubh/(np.sum(iok)**0.5)
+                
+                # and project to the preferred direction
+                Rstath=np.multiply(xc[:,:,iok],np.conj(np.divide(Rphsi,Rphsa)))
+                Rstath=np.real(Rstath)
+                Rstati[:,:,kb:kb+1]=np.median(Rstath,axis=Rstath.ndim-1,keepdims=True)
+
+        else:
+
+
+            print('a')
+            print(np.max(np.abs(xc)))
+
+            # compute phase walkout
+            Rstati=np.abs(np.dot(xc,mmult))
 
         # count the number of stations per window
         nn=np.dot(dok,mmult.astype(float))
         nni=np.ma.masked_array(nn,mask=nn<2)
         
         # value to subtract depends on normalization
-        if self.params['normtype']=='full':
+        if phasefirst:
+            pass
+        elif self.params['normtype']=='full':
             Rsub=1.
         else:
             if xc2 is None:
@@ -1306,7 +1399,10 @@ class PhaseCoherence(object):
             Rsub=np.ma.divide(np.dot(xc2,mmult),nni)
 
         # to phase coherence
-        Rstati=np.divide(np.divide(np.power(Rstati,2),nni)-Rsub,nni-1.)
+        if phasefirst:
+            Rstati=Rstati-Rsub
+        else:
+            Rstati=np.divide(np.divide(np.power(Rstati,2),nni)-Rsub,nni-1.)
         
         # average over frequencies
         Rstati=np.ma.mean(Rstati,axis=0).reshape([Nt,mmult.shape[1]])

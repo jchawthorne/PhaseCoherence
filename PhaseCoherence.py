@@ -6,8 +6,6 @@ Transformed into class by B. Gombert (May 2018)
 
 '''
 
-
-
 # Import classic external stuff
 import copy
 import numpy as np
@@ -353,7 +351,7 @@ class PhaseCoherence(object):
     def setParams(self,reftemp=None, shtemp=None, wintemp=None,buftemp=None,\
                   reflook=None, shlook=None, wlenlook=None, tlook=None,\
                   blim=None, shtry=None, shgrid=None,normtype=None,abound=None,
-                  returnjack=None):
+                  returnjack=None,uncweights=None):
 
         ''' 
         Set the different parameters used for the phase coherence analysis in a dictionnary
@@ -378,6 +376,7 @@ class PhaseCoherence(object):
         * normtype  : which type of normalization to use (default: 'full')
         * abound    : a bounding on the amplitude after normalization (default: 3)
         * returnjack: Return the jackknifing results
+        * uncweights: choose weighting based on taper uncertainty
         '''
 
         # Make empty dictionnary if needed
@@ -470,6 +469,15 @@ class PhaseCoherence(object):
         elif param['abound'] is None:
             param['abound']=3.
 
+        # for the uncertainty-based weighting
+        if uncweights is not None:
+            param['uncweights']=uncweights
+        elif 'uncweights' not in param.keys():
+            param['uncweights']=False
+        elif param['uncweights'] is None:
+            param['uncweights']=False
+
+            
 
         # All done
         return
@@ -901,16 +909,17 @@ class PhaseCoherence(object):
         return
 
 
-    #-------------------------------------------------------------
-    def normalize_xc(self,xc=None,xct=None,normtype='full'):
+    #---------BEGIN FOR WEIGHTING AND NORMALIZATION--------------------------------------------
+
+    def _calc_weights(self,xc=None,xct=None):
         """
         compute the power in the template
         :param        xc: the unnormalized x-c with the target data
                              (default: self.xc)
         :param       xct: the unnormalized x-c of the template with itself
                              (default: self.xct)
-        :return       xc: the normalized x-c
-        :return     wgts: the weights used for each value
+        :return     wdiv: what to multiply each xc value by 
+        :return     wgts: the weights to multiply by after the division
         """
 
         if xc is None:
@@ -918,84 +927,124 @@ class PhaseCoherence(object):
         if xct is None:
             xct=self.xct
 
+        # which normalization
+        normtype=self.params['normtype']
 
+        # default is just to normalise, not weight
+        wgts=np.ones([1,xc.shape[1],xc.shape[2]],dtype=float)
+    
         if normtype=='full':
             # full normalization, proper phase coherence
-            xc = np.divide(xc,np.abs(xc))
-            wgts = 1.
-        elif normtype=='template_complete':
+            wdiv=np.nanmean(np.power(np.abs(xc),2),axis=3)
+            wdiv=np.power(wdiv,-0.5)
+
+        if 'template' in normtype:
             # normalize by the template, try to estimate power relative to
             # the template, no regularization
-            tpow = np.abs(xct)
-            tpow = tpow.reshape([xct.shape[0],1,xct.shape[1]])
-            xc = np.divide(xc,tpow)
-            wgts = 1.
-        elif normtype=='template_bounded':
-            # normalize by the template, try to estimate power relative to
-            # the template, downweight values where the power is much larger
-            # or smaller than we'd expect
-            tpow = np.abs(xct)
-            tpow = tpow.reshape([xct.shape[0],1,xct.shape[1]])
-            xc = np.divide(xc,tpow)
 
-            # that would give the fully normalized value, but now note
-            # that some are exceptionally large or small
-            # relative to median at each station
-            wgts = np.abs(xc)
-            wgts = np.divide(np.ma.median(wgts,axis=2,keepdims=True),wgts)
-
-            # note the outliers
-            abound=self.params['abound']
-            ioutlier=np.logical_or(wgts<1/abound,wgts>abound)
-            wgts[ioutlier]=np.minimum(wgts[ioutlier],1/abound)
-
-            # set all the other weights to 1.
-            wgts[~ioutlier]=1.
-
-            # and go ahead and multiply the normalized x-c by the weights
-            xc=np.multiply(xc,wgts)
-
-        elif normtype=='template_bounded_bystation':
-            # normalize by the template, try to estimate power relative to
-            # the template, downweight values where the power is much larger
-            # or smaller than we'd expect
-            tpow = np.abs(xct)
-            tpow = tpow.reshape([xct.shape[0],1,xct.shape[1]])
-            xc = np.divide(xc,tpow)
-
-            # that would give the fully normalized value, but now note
-            # that some are exceptionally large or small
-            # relative to median at each station
-            # average over frequencies at each station
-            wgts = np.nanmean(np.abs(xc),axis=0,keepdims=True)
-            wgtsi=np.median(wgts[0,:,:],axis=0)
-            wgts = np.divide(np.ma.median(wgts,axis=2,keepdims=True),wgts)
-
-            # note the outliers
-            abound=self.params['abound']
-
-            # outliers where signal is too big
-            ibig=wgts<1/abound
-            wgts[ibig]=np.power(wgts[ibig]*abound,2)
+            if 'template-sumfreq' in normtype:
+                # may want to average over frequencies first
+                xct=np.nanmean(xct,axis=0,keepdims=True)
             
-            # and where the signal is too small
-            ismall=wgts>abound
-            wgts[ismall]=np.minimum(wgts[ismall],abound)
+            wdiv = np.divide(1,np.abs(xct))
+            wdiv = wdiv.reshape([xct.shape[0],1,xct.shape[1]])
 
-            # set all the other weights to 1.
-            ioutlier=np.logical_or(ibig,ismall)
-            wgts[~ioutlier]=1.
+        # and if we want to change the weighting because some might be noisier
+        if 'bounded' in normtype:
+            # estimate taper-averaged power, normalized
+            xpow=np.power(np.nanmean(np.power(np.abs(xc),2),axis=3),0.5)
+            xpow=np.multiply(xpow,wdiv)
+
             
-            # and go ahead and multiply the normalized x-c by the weights
-            xc=np.multiply(xc,wgts)
+            # may want to average over frequency first
+            if 'bounded-sumfreq' in normtype:
+                xpow=np.nanmean(xpow,axis=0,keepdims=True)
+
+            # compute ratio of median amplitude to amplitude at each station
+            # if we wanted all stations to be weighted equally,
+            # we'd multiply by this
+            wgts = np.divide(np.ma.median(xpow,axis=2,keepdims=True),xpow)
+
+            # want to put all weights between 1/abound and abound to 1
+            abound=self.params['abound']
+            wbig=wgts>=abound
+            wsmall=wgts<=1/abound
+
+            # set middle weights to 1
+            wgts[np.logical_and(~wbig,~wsmall)]=1.
+
+            # let large weights go from 1 at the outer edge
+            wgts[wbig]=wgts[wbig]/abound
+            
+            # let small weights go from 1 at the outer edge
+            wgts[wsmall]=wgts[wsmall]*abound
 
         # set problematic intervals to zero
         doki = self.dok.reshape([1,xc.shape[1],xc.shape[2]])
-        xc[np.repeat(~doki,xc.shape[0],axis=0)]=0.
         if isinstance(wgts,np.ndarray):
             wgts[np.repeat(~doki,wgts.shape[0],axis=0)]=0.
         
-        return xc,wgts
+        # save
+        self.wdiv=wdiv
+        self.wgts=wgts
+
+
+    def weights_from_taper(self):
+        """
+        compute station-dependent weighting by tapers
+        """
+
+
+        # compute inter-component coherence
+        Nt=len(self.params['tlook'])
+        nper=self.stations['nper']
+        Cpcomp=np.zeros([Nt,len(nper),self.Ntap],dtype=float)
+        Cpcompn=np.zeros([Nt,len(nper),self.Ntap],dtype=float)
+
+        for ktap in range(0,self.Ntap):
+            # normalize
+            xc=np.multiply(self.xc[:,:,:,ktap],self.wdiv)
+            xc=np.multiply(xc,self.wgts)
+            
+            # calculate values for each taper
+            Cpcomp[:,:,ktap],Cpcompn[:,:,ktap],Ncomp=\
+                self._cpcomp_main_calc(xc,self.wgts)
+
+        # normalize
+        Cpcomp=np.divide(Cpcomp,np.nanmean(Cpcompn,axis=2,keepdims=True))
+            
+        # determine an uncertainty for each station
+        Cpcomp=np.power(np.ma.std(Cpcomp,axis=2),-1)
+
+        # but set weights larger than twice the median to the median
+        mdn=np.ma.median(Cpcomp,axis=1,keepdims=True)
+        ix=Cpcomp>2*mdn
+        mdn=np.repeat(mdn,Cpcomp.shape[1],axis=1)
+        Cpcomp[ix]=mdn[ix]
+
+        # and need to map the station weighting 
+        self.apply_station_weighting(Cpcomp)
+
+    def apply_station_weighting(self,statwgts):
+        """
+        :param       statwgts: the weights to use
+                                   [number of times x number of stations]
+        """
+
+        # note the station mapping
+        ins=self.stations['ins']
+
+        # remember
+        saveweight=True
+        if saveweight:
+            self.statwgts=statwgts
+
+        # reshape as appropriate
+        statwgts=statwgts.reshape([1,statwgts.shape[0],statwgts.shape[1]])
+
+        # and multiply
+        self.wgts=np.multiply(self.wgts,statwgts[:,:,ins])
+
 
     
     def plot_template_power(self):
@@ -1014,7 +1063,9 @@ class PhaseCoherence(object):
         p.set_xscale('log')
         p.set_yscale('log')
     
+    #---------END FOR WEIGHTING AND NORMALIZATION--------------------------------------------
 
+    
     #-------------------------------------------------------------
     def computeCp(self,cptype='both'):
         '''
@@ -1042,15 +1093,26 @@ class PhaseCoherence(object):
         Ntap    = self.Ntap
         freq    = self.freq
 
-
         # Initialize Cp dict        
         Cp = {'tlook':tlook,'freq':freq,'Ntap':Ntap,'nsc':nsc}
+        self.Cp = Cp
 
-        # initialize output
+        #------UNCERTAINTY PARAMETERS-----------------------------
+        
+        # number of bootstrap resamplings
+        Nsboot=50
+
+        # use uncertainty from tapering?
+        tapunc=False
+        self.params['tapunc']=tapunc
+
+
+        #-----INITIALIZE OUTPUT-----------------------------------
+
         if cptype in ['stat','both']:
             # to save inter-station coherence
-            Nsboot=50
             Cpstat=np.zeros([Nt,Nsboot+1,self.Ntap],dtype=float)
+            Cpstatn=np.zeros([Nt,Nsboot+1,self.Ntap],dtype=float)
             
         if cptype in ['comp','both']:
             # and inter-station coherence
@@ -1059,206 +1121,318 @@ class PhaseCoherence(object):
 
         print('starting cp computation')
 
-        # use uncertainty from tapering?
-        tapunc=False
+        #-----DETERMINE STATION-DEPENDENT WEIGHTING---------------
 
+        # compute the weights to use
+        self._calc_weights(self.xc)
+
+
+        #-----MAY WANT TO WEIGHT BASED ON TAPER-DERIVED UNCERTAINTY------
+        if self.params['uncweights']:
+            self.weights_from_taper()
+
+        
         # iterate per taper
         for ktap in range(0,self.Ntap):
             # normalize
-            xc,wgts=self.normalize_xc(self.xc[:,:,:,ktap],
-                                      normtype=self.params['normtype'])
+            xc=np.multiply(self.xc[:,:,:,ktap],self.wdiv)
+            xc=np.multiply(xc,self.wgts)
 
-            # note if the weights are more complex
-            wgtarray=isinstance(wgts,np.ndarray)
+            #-----------inter-station coherence--------------------------
             
-            # go ahead and square some intervals
-            xc2 = np.power(np.abs(xc),2)
-
             # choose a set of stations to bootstrap, from the same set of stations for all
             # time intervals
-
-            statok=np.where(nper>=1)[0]
-            npick=int(np.ceil(statok.size*0.8))
-            # these are the weights for each station for the bootstrap selections
-            mtx=np.array([np.bincount(np.random.choice(statok,npick,replace=False),
-                                      minlength=len(nper))
-                          for kb in range(0,Nsboot)]).T.astype(bool)
-            if self.params['returnjack']:
-                Cp['ijack_stat']=mtx
-            mtx=np.append(np.ones([nper.size,1],dtype=bool),mtx,axis=1)
-
+            mtx=self._pick_bootstrap_stations(statok=nper>=1,Nsboot=Nsboot)
+            self.bootsmtx=mtx
             
             if cptype in ['stat','both']:
-                # sum, separated by station
-                Nstat=np.zeros([Nt,1+Nsboot,Nc])
-
-                # compute inter-station coherence for each component
-                for ks in range(0,Nc):
-                    # compute and add for each frequency
-
-                    # at each component
-                    ii=icmp==ks
-                    mmult=mtx[ins[ii],:]
-
-                    if sum(ii)>1:
-                        if isinstance(wgts,np.ndarray):
-                            wgtsi=wgts[:,:,ii]
-                        else:
-                            wgtsi=wgts
-                        # coherence for this component
-                        Rstati,Rstatn,nn=self._calcCp(xc=xc[:,:,ii],ii=None,dok=dok[:,ii],
-                                               wgts=wgtsi,mmult=mmult)
-
-                        # normalise
-                        Rstati=np.divide(Rstati,Rstatn)
-                        
-                        # add to set
-                        Cpstat[:,:,ktap]=Cpstat[:,:,ktap]+Rstati
-                        Nstat[:,:,ks]=Nstat[:,:,ks]+nn
+                # calculate values for each taper
+                Cpstat[:,:,ktap],Cpstatn[:,:,ktap],Nstat=\
+                    self._cpstat_main_calc(xc,self.wgts)
 
                 if ktap==self.Ntap-1:
-                    # normalize inter-station coherence
-                    Nci = np.sum(Nstat>=2,axis=2).astype(float)
-                    Nci = np.ma.masked_array(Nci,mask=Nci==0)
-                    Nci = Nci.reshape(list(Nci.shape)+[1])
+                    # and calculate uncertainties if we're finished
+                    self.cpstat_unc_calc(Cpstat,Cpstatn,Nstat)
 
-                    # go ahead and normalize everything
-                    Cpstat = np.divide(Cpstat,Nci)
-                    
-                    # get uncertainty
-                    if Nsboot>=3 and self.Ntap>1 and tapunc:
-                        # sum bootstrap and taper uncertainties
-                        Cpstat_std_tap=np.ma.var(Cpstat[:,0,:],axis=1)/self.Ntap
-                        Cpstat_std_boot=np.ma.mean(Cpstat[:,1:,:],axis=2)
-                        if self.params['returnjack']:
-                            Cp['Cpstat_jack']=Cpstat_std_boot
-                        Cpstat_std_boot=np.ma.var(Cpstat_std_boot,axis=1)
-                        Cpstat_std=np.power(Cpstat_std_boot+Cpstat_std_tap,0.5)
-                    elif Nsboot>=3:
-                        # just bootstrap uncertainty
-
-                        # taper-averaged bootstrap values
-                        Cpstat_std=np.ma.mean(Cpstat[:,1:,:],axis=2)
-                        # save output
-                        if self.params['returnjack']:
-                            Cp['Cpstat_jack']=Cpstat_std
-                        # get std
-                        Cpstat_std=np.ma.std(Cpstat_std,axis=1)
-                    elif self.Ntap>1:
-                        # just taper uncertainty
-                        Cpstat_std=np.ma.std(Cpstat[:,0,:],axis=1)/self.Ntap**0.5
-                    else:
-                        # no uncertainty estimate
-                        Cpstat_std=np.ma.masked_array(np.zeros(Nt,dtype=float),
-                                                      mask=np.ones(Nt,dtype=bool))
-
-                        
-                    # and the best estimate, with all stations
-                    Cpstat = np.ma.mean(Cpstat[:,0,:],axis=1)
-
-                    Cp['Cpstat'] = Cpstat
-                    Cp['Nstat']  = Nstat
-                    Cp['Cpstat_std'] = Cpstat_std
-            
-
-            #------------------------------------------------------
+            #------------inter-component coherence-------------------------
             if cptype in ['comp','both']:
-                # and consider components per station
-                Ncomp=np.zeros([Nt,len(nper)])
-                
-                # for components
-                for ks in range(0,len(nper)):
-                    # at each station
-                    ii=ins==ks
-                
-                    if sum(ii)>1:
-                        # coherence for this component
-                        Rcompi,Rcompn,nn=self._calcCp(xc,ii,dok,wgts)
-                        
-                        # add to set
-                        Cpcomp[:,ks,ktap]=Cpcomp[:,ks,ktap]+Rcompi
-                        Cpcompn[:,ks,ktap]=Cpcompn[:,ks,ktap]+Rcompn
-                        Ncomp[:,ks]=Ncomp[:,ks]+nn
+
+                # calculate values for each taper
+                Cpcomp[:,:,ktap],Cpcompn[:,:,ktap],Ncomp=\
+                    self._cpcomp_main_calc(xc,self.wgts)
+
 
                 if ktap==self.Ntap-1:
-                    # trash stations with no information
-                    Ncompi=Ncomp>=2
-                    statok=np.sum(Ncompi,axis=0)>0
-                    Ncompi,Cpcomp=Ncompi[:,statok],Cpcomp[:,statok,:]
-                    Cpcompn=Cpcompn[:,statok,:]
-                    nsta=Cpcomp.shape[1]
+                    # and calculate uncertainties if we're finished
+                    self._cpcomp_unc_calc(Cpcomp,Cpcompn,Ncomp)
 
-                    # for normalization
-                    Nci = np.sum(Ncompi,axis=1).astype(float)
+
+
+#--------------------BEGIN FOR BOOTSTRAPPING-------------------------------
+
+    def _pick_bootstrap_stations(self,statok,Nsboot=20):
+        """
+        :param         statok: a list of acceptable stations
+        :param         Nsboot: how many samplings
+        :return           mtx: of matrix of which stations to use in each sample
+        """
+
+        # maximum number of stations originally
+        ntot=len(statok)
+        statok=np.where(statok)[0]
+        
+        # in case we don't want to pick all stations
+        npick=int(np.ceil(statok.size*0.8))
+
+        # these are the weights for each station for the bootstrap selections
+        mtx=np.array([np.bincount(np.random.choice(statok,npick,replace=False),
+                                  minlength=ntot)
+                      for kb in range(0,Nsboot)]).T.astype(bool)
+        if self.params['returnjack']:
+            Cp['ijack_stat']=mtx
+        mtx=np.append(np.ones([ntot,1],dtype=bool),mtx,axis=1)
+
+        return mtx
+        
+
+#--------------------END FOR BOOTSTRAPPING-------------------------------
+
+
+#-------------------BEGIN CALCULATING CP VALUES------------------
+
+
+    def cpstat_unc_calc(self,Cpstat,Cpstatn,Nstat):
+        """
+        :param        Cpstat: inter-station Cp
+        :param       Cpstatn: the normalizations
+        :param         Nstat: number of stations per value
+        """
+
+
+        # number of components per interval
+        Nci = np.sum(Nstat>=2,axis=2).astype(float)
+        Nci = np.ma.masked_array(Nci,mask=Nci==0)
+        Nci = Nci.reshape(list(Nci.shape)+[1])
+
+        # go ahead and normalize everything
+        Cpstat = np.divide(Cpstat,Nci)
+
+        # average denominator over taper before dividing
+        Cpstatn = np.ma.mean(Cpstatn,axis=2,keepdims=True)
+        Cpstat=np.divide(Cpstat,Cpstatn)
+
+        # note the bootstrap matrix
+        mtx=self.bootsmtx
+        Nsboot=mtx.shape[1]-1
+
+
+        # note whether we want taper uncertainties
+        tapunc=self.params['tapunc']
                     
-                    # choose various subsets of the stations to bootstrap
-                    # we'll just assume the same station distribution for all times
-                    Nsboot=50
-                    if Nsboot>=3 and nsta>1:
-                        # which bootstrap stations
-                        npick=int(nsta*.8)
-                        mtx=np.array([np.bincount(np.random.choice(nsta,npick,replace=False),
-                                                  minlength=nsta)
-                                      for kb in range(0,Nsboot)]).T
+        # get uncertainty
+        if Nsboot>=3 and self.Ntap>1 and tapunc:
+            # sum bootstrap and taper uncertainties
+            
+            Cpstat_std_tap=np.ma.var(Cpstat[:,0,:],axis=1)/self.Ntap
+            Cpstat_std_boot=np.ma.mean(Cpstat[:,1:,:],axis=2)
 
-                        # correct normalization
-                        Cpcomp_std=np.ma.mean(Cpcomp,axis=2)
-                        Cpcomp_std=np.ma.dot(Cpcomp_std,mtx)
+            if self.params['returnjack']:
+                self.Cp['Cpstat_jack']=Cpstat_std_boot
+            Cpstat_std_boot=np.ma.var(Cpstat_std_boot,axis=1)
+            Cpstat_std=np.power(Cpstat_std_boot+Cpstat_std_tap,0.5)
+
+        elif Nsboot>=3:
+            # just bootstrap uncertainty
+                
+            # taper-averaged bootstrap values
+            Cpstat_std=np.ma.mean(Cpstat[:,1:,:],axis=2)
+
+            # save output
+            if self.params['returnjack']:
+                self.Cp['Cpstat_jack']=Cpstat_std
+
+            # get std
+            Cpstat_std=np.ma.std(Cpstat_std,axis=1)
+
+        elif self.Ntap>1:
+            # just taper uncertainty
+            
+            Cpstat_std=np.ma.std(Cpstat[:,0,:],axis=1)/self.Ntap**0.5
+        else:
+            # no uncertainty estimate
+            
+            Cpstat_std=np.ma.masked_array(np.zeros(Nt,dtype=float),
+                                          mask=np.ones(Nt,dtype=bool))
+
+        # and the best estimate, with all stations
+        Cpstat = np.ma.mean(Cpstat[:,0,:],axis=1)
 
 
-                        if not np.isscalar(Cpcompn):
-                            Cpcomp_stdn=np.ma.dot(np.mean(Cpcompn,axis=2),mtx)
-                        else:
-                            Cpcomp_stdn=Cpcompn
-
-                        # normalize and average over stations
-                        Cpcomp_std=np.ma.divide(np.ma.divide(Cpcomp_std,Cpcomp_stdn),
-                                             np.dot(Ncompi,mtx))
-
-
-                        # save the jackknife results if desired
-                        if self.params['returnjack']:
-                            Cp['Cpcomp_jack']=Cpcomp_std
-                            Cp['ijack_comp']=mtx
-
-                        # and to variance
-                        Cpcomp_std=np.ma.var(Cpcomp_std,axis=1)
-
-                        # add tapering?
-                        if self.Ntap>1 and tapunc:
-                            Cpcomp_std_tap=np.divide(np.ma.mean(Cpcomp,axis=1),
-                                                     np.ma.mean(Cpcompn,axis=1))
-                            Cpcomp_std_tap=np.ma.var(Cpcomp_std_tap,axis=1)/self.Ntap
-                            Cpcomp_std_tap = np.ma.divide(Cpcomp_std_tap,Nci)
-                            Cpcomp_std=np.power(Cpcomp_std+Cpcomp_std_tap,0.5)
-                        else:
-                            Cpcomp_std=np.power(Cpcomp_std,0.5)
-                    elif self.Ntap>1:
-                        Cpcomp_std = np.divide(np.ma.mean(Cpcomp,axis=1),
-                                             np.ma.mean(Cpcompn,axis=1))
-                        Cpcomp_std = np.ma.std(np.ma.mean(Cpcomp_std,axis=1),axis=1)
-                        Cpcomp_std = np.ma.divide(Cpcomp_std,Nci*Ntap**0.5)
-                    else:
-                        Cpcomp_std=np.ma.masked_array(np.zeros(Nt,dtype=float),mask=True)
-
-                    # normalize the average inter-component coherence
-                    Cpcomp=np.ma.mean(Cpcomp,axis=2)
-                    Cpcompn=np.ma.mean(Cpcompn,axis=2)
-                    Cpcomp=np.divide(np.ma.sum(Cpcomp,axis=1),
-                                     np.ma.sum(Cpcompn,axis=1))
-                    Cpcomp = np.ma.divide(Cpcomp,Nci)
-
-                    Cp['Cpcomp'] = Cpcomp
-                    Cp['Ncomp']  = Ncomp
-                    Cp['Cpcomp_std'] = Cpcomp_std
-
-        #--------------------------------------------------------------
-
-        # Save it
-        self.Cp = Cp
-
+        self.Cp['Cpstat'] = Cpstat
+        self.Cp['Nstat']  = Nstat
+        self.Cp['Cpstat_std'] = Cpstat_std
+            
         return 
 
+
+
+    
+    def _cpstat_main_calc(self,xc,wgts):
+        """
+        :param         xc: cross-correlation values
+        :param       wgts: weightings
+        """
+
+        # Get some parameters
+        Nt      = xc.shape[1]  # number of indices
+        Nc      = self.stations['Nc']
+        icmp    = self.stations['icmp']
+        ins     = self.stations['ins']
+        dok     = self.dok
+        mtx     = self.bootsmtx
+        Nsboot  = mtx.shape[1]-1
+
+                
+        # sum, separated by station
+        Nstat=np.zeros([Nt,Nsboot+1,Nc])
+        Cpstat=np.zeros([Nt,Nsboot+1])
+        Cpstatn=np.zeros([Nt,Nsboot+1])
+
+        # compute inter-station coherence for each component
+        for ks in range(0,Nc):
+            
+            # at each component
+            ii=icmp==ks
+            mmult=mtx[ins[ii],:]
+            
+            if sum(ii)>1:
+                # coherence for this component
+                Rstati,Rstatn,nn=self._calcCp(xc=xc[:,:,ii],ii=None,dok=dok[:,ii],
+                                              wgts=wgts[:,:,ii],mmult=mmult)
+                
+                
+                # add to set
+                Cpstat=Cpstat+Rstati
+                Cpstatn=Cpstatn+Rstatn
+                Nstat[:,:,ks]=Nstat[:,:,ks]+nn
+
+
+        return Cpstat,Cpstatn,Nstat
+
+    def _cpcomp_main_calc(self,xc,wgts):
+        """
+        :param         xc: cross-correlation values
+        :param       wgts: weightings
+        """
+
+        # Get some parameters
+        Nt      = xc.shape[1]  # number of indices
+        Nc      = self.stations['Nc']
+        icmp    = self.stations['icmp']
+        ins     = self.stations['ins']
+        dok     = self.dok
+        nper    = self.stations['nper']
+    
+        # and consider components per station
+        Ncomp=np.zeros([Nt,len(nper)])
+        Cpcomp=np.zeros([Nt,len(nper)])
+        Cpcompn=np.zeros([Nt,len(nper)])
+                
+        # for components
+        for ks in range(0,len(nper)):
+            # at each station
+            ii=ins==ks
+            
+            if sum(ii)>1:
+                # coherence for this component
+                Cpcomp[:,ks],Cpcompn[:,ks],Ncomp[:,ks]=\
+                    self._calcCp(xc,ii,dok,wgts)
+
+        return Cpcomp,Cpcompn,Ncomp
+
+
+    def _cpcomp_unc_calc(self,Cpcomp,Cpcompn,Ncomp,Ncboot=20):
+        """
+        :param        Cpcomp: inter-component coherence by station
+        :param       Cpcompn: normalization factors
+        :param         Ncomp: number of components
+        :param        Ncboot: number of bootstrap resamplings
+        """
+        
+        # trash stations with no information
+        Ncompi=Ncomp>=2
+        statok=np.sum(Ncompi,axis=0)>0
+        Ncompi,Cpcomp=Ncompi[:,statok],Cpcomp[:,statok,:]
+        Cpcompn=Cpcompn[:,statok,:]
+        nsta=Cpcomp.shape[1]
+
+        # for normalization
+        Nci = np.sum(Ncompi,axis=1).astype(float)
+                    
+        # choose various subsets of the stations to bootstrap
+        # we'll just assume the same station distribution for all times
+        if Ncboot>=3 and nsta>1:
+            # which bootstrap stations
+            npick=int(nsta*.8)
+            mtx=np.array([np.bincount(np.random.choice(nsta,npick,replace=False),
+                                      minlength=nsta)
+                          for kb in range(0,Ncboot)]).T
+            
+            # correct normalization
+            Cpcomp_std=np.ma.mean(Cpcomp,axis=2)
+            Cpcomp_std=np.ma.dot(Cpcomp_std,mtx)
+            
+            
+            if not np.isscalar(Cpcompn):
+                Cpcomp_stdn=np.ma.dot(np.mean(Cpcompn,axis=2),mtx)
+            else:
+                Cpcomp_stdn=Cpcompn
+
+            # normalize and average over stations
+            Cpcomp_std=np.ma.divide(np.ma.divide(Cpcomp_std,Cpcomp_stdn),
+                                    np.dot(Ncompi,mtx))
+                
+            
+            # save the jackknife results if desired
+            if self.params['returnjack']:
+                self.Cp['Cpcomp_jack']=Cpcomp_std
+                self.Cp['ijack_comp']=mtx
+                
+            # and to variance
+            Cpcomp_std=np.ma.var(Cpcomp_std,axis=1)
+
+            # add tapering?
+            if self.Ntap>1 and self.params['tapunc']:
+                Cpcomp_std_tap=np.divide(np.ma.mean(Cpcomp,axis=1),
+                                         np.ma.mean(Cpcompn,axis=1))
+                Cpcomp_std_tap=np.ma.var(Cpcomp_std_tap,axis=1)/self.Ntap
+                Cpcomp_std_tap = np.ma.divide(Cpcomp_std_tap,Nci)
+                Cpcomp_std=np.power(Cpcomp_std+Cpcomp_std_tap,0.5)
+            else:
+                Cpcomp_std=np.power(Cpcomp_std,0.5)
+        elif self.Ntap>1:
+            # just taper-dependent uncertainty
+            Cpcomp_std = np.divide(np.ma.mean(Cpcomp,axis=1),
+                                   np.ma.mean(Cpcompn,axis=1))
+            Cpcomp_std = np.ma.std(np.ma.mean(Cpcomp_std,axis=1),axis=1)
+            Cpcomp_std = np.ma.divide(Cpcomp_std,Nci*Ntap**0.5)
+        else:
+            Cpcomp_std=np.ma.masked_array(np.zeros(Nt,dtype=float),mask=True)
+
+        # normalize the average inter-component coherence
+        Cpcomp=np.ma.mean(Cpcomp,axis=2)
+        Cpcompn=np.ma.mean(Cpcompn,axis=2)
+        Cpcomp=np.divide(np.ma.sum(Cpcomp,axis=1),
+                         np.ma.sum(Cpcompn,axis=1))
+        Cpcomp = np.ma.divide(Cpcomp,Nci)
+        
+        self.Cp['Cpcomp'] = Cpcomp
+        self.Cp['Ncomp']  = Ncomp
+        self.Cp['Cpcomp_std'] = Cpcomp_std
+
+        return
+
+    
     def _calcCp(self,xc,ii=None,dok=None,wgts=None,mmult=None,xc2=None,wgts2=None):
         """
         calculate the coherence or coherent energy given the cross-spectra and weights
@@ -1318,7 +1492,8 @@ class PhaseCoherence(object):
 
         # if the weights vary with time and location, need to
         # sum the weighted template
-        if self.params['normtype'] in ['template_bounded']:
+
+        if 'bounded' in self.params['normtype']:
             # average without taking absolute value (Phase walkout)
             Rstatn=np.abs(np.dot(wgts,mmult))
 
@@ -1333,18 +1508,6 @@ class PhaseCoherence(object):
             # average over frequencies
             Rstatn=np.ma.mean(Rstatn,axis=0).reshape([Nt,mmult.shape[1]])
             
-        elif self.params['normtype'] in ['template_bounded_bystation']:
-            # average without taking absolute value (Phase walkout)
-            Rstatn=np.abs(np.dot(wgts,mmult))
-            
-            # subtract mean
-            if wgts2 is None:
-                wgts2=np.power(np.abs(wgts),2)
-            Rsub=np.ma.divide(np.dot(wgts2,mmult),nni)
-            
-            # to phase coherence
-            Rstatn=np.ma.divide(np.ma.divide(np.power(Rstatn,2),nni)-Rsub,nni-1.)
-            Rstatn=Rstatn.reshape(Rstati.shape)
         else:
             # note a single normalization
             Rstatn=1.
